@@ -1,6 +1,7 @@
 // Standard C++ includes
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -36,18 +37,17 @@ template<typename T>
 using HostDeviceArray = std::pair < T*, T* > ;
 
 //-----------------------------------------------------------------------------
-__global__ void testPerThreadBisect(unsigned int offset, uint16_t *d_outIndex, unsigned int *d_mergedPresynapticUpdateGroupStartID1)
+__global__ void testPerThreadBisect(unsigned int offset, uint16_t *d_outIndex, 
+                                    const unsigned int* __restrict__ d_mergedPresynapticUpdateGroupStartID1)
 {
     const unsigned int id = 32 * blockIdx.x + threadIdx.x; 
-    
     const unsigned int offsetID = offset + id;
     
     unsigned int lo = 0;
     unsigned int hi = 62496;
-    while(lo < hi)
-    {
+    while(lo < hi) {
         const unsigned int mid = (lo + hi) / 2;
-        if(offsetID < d_mergedPresynapticUpdateGroupStartID1[mid]) {
+        if(offsetID < __ldg(d_mergedPresynapticUpdateGroupStartID1 + mid)) {
             hi = mid;
         }
         else {
@@ -89,6 +89,43 @@ void deviceToHostCopy(HostDeviceArray<T> &array, unsigned int count)
     CHECK_CUDA_ERRORS(cudaMemcpy(array.first, array.second, count * sizeof(T), cudaMemcpyDeviceToHost));
 }
 //-----------------------------------------------------------------------------
+void loadBalanceSearchDumbCPU(unsigned int offset, unsigned int numThreads, unsigned int numGroups,
+                              uint16_t *outIndex, const unsigned int *mergedPresynapticUpdateGroupStartID1)
+{
+    for(unsigned int i = 0; i < numThreads; i++) {
+        const auto u = std::upper_bound(&mergedPresynapticUpdateGroupStartID1[0], &mergedPresynapticUpdateGroupStartID1[numGroups],
+                                        i + offset);
+        
+        outIndex[i] = std::distance(mergedPresynapticUpdateGroupStartID1, u) - 1;
+    }
+}
+//-----------------------------------------------------------------------------
+void loadBalanceSearchCPU(unsigned int offset, unsigned int numThreads, unsigned int numGroups,
+                          uint16_t *outIndex, const unsigned int *mergedPresynapticUpdateGroupStartID1)
+{
+    unsigned int t = 0;
+    unsigned int g = 0;
+    while(t < numThreads || g < numGroups) {
+        bool p;
+        if(g >= numGroups) {
+            p = true;
+        }
+        else if(t >= numThreads) {
+            p = false;
+        }
+        else {
+            p = ((t + offset) < mergedPresynapticUpdateGroupStartID1[g]);
+        }
+        
+        if(p) {
+            outIndex[t++] = g - 1;
+        }
+        else {
+            g++;
+        }
+    }
+}
+//-----------------------------------------------------------------------------
 int main()
 {
     const unsigned int numGroups = sizeof(mergedPresynapticUpdateGroupStartID1) / sizeof(unsigned int);
@@ -106,8 +143,9 @@ int main()
     auto outIndex = allocateHostDevice<uint16_t>(numThreads);
     hostToDeviceCopy(outIndex, numThreads);
 
+    loadBalanceSearchCPU(offset, numThreads, numGroups, outIndex.first, mergedPresynapticUpdateGroupStartID1);
     // Create device version of presynaptic update group start ids
-    unsigned int *d_mergedPresynapticUpdateGroupStartID1;
+    /*unsigned int *d_mergedPresynapticUpdateGroupStartID1;
     CHECK_CUDA_ERRORS(cudaMalloc(&d_mergedPresynapticUpdateGroupStartID1, numGroups * sizeof(unsigned int)));
     CHECK_CUDA_ERRORS(cudaMemcpy(d_mergedPresynapticUpdateGroupStartID1, mergedPresynapticUpdateGroupStartID1, 
                                  sizeof(unsigned int) * numGroups, cudaMemcpyHostToDevice));
@@ -127,7 +165,7 @@ int main()
     std::cout << "Search kernel takes " << time << "ms" << std::endl;
 
     // Copy output indices 
-    deviceToHostCopy(outIndex, numThreads);
+    deviceToHostCopy(outIndex, numThreads);*/
 
     // Verify binning
     unsigned int nextGroup = 1;
